@@ -35,7 +35,7 @@ juce_add_plugin(NTPerform
     PLUGIN_NAME              "NT Perform"
     COMPANY_NAME             "Nosuch"
     PLUGIN_MANUFACTURER_URL  ""
-    VST3_CATEGORIES          "Fx|Midi"
+    VST3_CATEGORIES          "Instrument|Synth"
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
 )
 

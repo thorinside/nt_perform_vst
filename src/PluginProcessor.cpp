@@ -154,9 +154,11 @@ void NTPerformProcessor::handleIncomingMidiMessage(juce::MidiInput*,
 // processBlock — audio thread (DAW routing fallback)
 //==============================================================================
 
-void NTPerformProcessor::processBlock(juce::AudioBuffer<float>& /*audio*/,
+void NTPerformProcessor::processBlock(juce::AudioBuffer<float>& audio,
                                        juce::MidiBuffer& midi)
 {
+    audio.clear();
+
     // Inject queued outgoing message (DAW-routing fallback only)
     {
         juce::ScopedLock ol(outgoingLock_);
