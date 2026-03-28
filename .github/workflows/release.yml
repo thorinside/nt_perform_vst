@@ -227,16 +227,22 @@ jobs:
       - name: Build NSIS installer
         shell: pwsh
         run: |
-          $vst3 = "build\NTPerform_artefacts\Release\VST3\NTPerform.vst3"
-          $nsiScript = "scripts\windows-installer.nsi"
+          $vst3     = Resolve-Path "build\NTPerform_artefacts\Release\VST3\NTPerform.vst3"
+          $nsiSrc   = Resolve-Path "scripts\windows-installer.nsi"
+          $stage    = "$env:RUNNER_TEMP\nsis-stage"
+          $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
 
-          # Stage VST3 next to the NSI script's working dir
-          Copy-Item -Recurse $vst3 .
+          # Stage: VST3 bundle + NSI script in the same directory so
+          # makensis resolves File paths correctly
+          New-Item -ItemType Directory -Path $stage -Force
+          Copy-Item -Recurse $vst3 "$stage\"
+          Copy-Item $nsiSrc "$stage\installer.nsi"
 
-          # Build installer (output file defined in the NSI script)
-          & "C:\Program Files (x86)\NSIS\makensis.exe" `
-            /DPRODUCT_VERSION=$env:VERSION `
-            $nsiScript
+          Push-Location $stage
+          & $makensis /DPRODUCT_VERSION=$env:VERSION installer.nsi
+          Pop-Location
+
+          Move-Item "$stage\NTPerform-$env:VERSION-Windows.exe" .
 
       - name: Upload to release
         uses: ncipollo/release-action@v1
