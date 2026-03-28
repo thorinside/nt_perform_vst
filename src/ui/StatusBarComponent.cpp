@@ -68,6 +68,12 @@ StatusBarComponent::StatusBarComponent()
     firmwareLabel_.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(firmwareLabel_);
 
+    viewToggleBtn_.setButtonText("Grid");
+    viewToggleBtn_.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF45475A));
+    viewToggleBtn_.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCDD6F4));
+    viewToggleBtn_.onClick = [this]() { if (onViewToggled) onViewToggled(); };
+    addAndMakeVisible(viewToggleBtn_);
+
     refreshButton_.setButtonText("Refresh");
     refreshButton_.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xFF45475A));
     refreshButton_.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFFCDD6F4));
@@ -152,6 +158,11 @@ void StatusBarComponent::setStatus(const juce::String& /*text*/)
     // Status is shown via firmware label; kept for compatibility
 }
 
+void StatusBarComponent::setGridView(bool isGrid)
+{
+    viewToggleBtn_.setButtonText(isGrid ? "Page" : "Grid");
+}
+
 void StatusBarComponent::flashTx()
 {
     txBrightness_.store(255);
@@ -202,15 +213,17 @@ void StatusBarComponent::resized()
     midiOutLabel_.setBounds(x, vpad, lblW,  itemH); x += lblW + lGap;
     midiOutCombo_.setBounds(x, vpad, comboW, itemH);
 
-    // Row 2: [8][80 SysEx][8][flex firmware][8][80 Refresh][8]
+    // Row 2: [8][80 SysEx][8][flex firmware][8][64 View][8][80 Refresh][8]
     const int row2y   = row;
     const int ctrlW   = 80; // 5×16
+    const int viewW   = 64; // 4×16
     const int fwX     = 8 + ctrlW + 8;
-    const int fwW     = w - fwX - 8 - ctrlW - 8;
+    const int fwW     = w - fwX - 8 - viewW - 8 - ctrlW - 8;
 
-    sysExIdCombo_.setBounds(8,          row2y + vpad, ctrlW, itemH);
-    firmwareLabel_.setBounds(fwX,       row2y + vpad, fwW,   itemH);
-    refreshButton_.setBounds(w - 8 - ctrlW, row2y + vpad, ctrlW, itemH);
+    sysExIdCombo_.setBounds  (8,                         row2y + vpad, ctrlW, itemH);
+    firmwareLabel_.setBounds (fwX,                       row2y + vpad, fwW,   itemH);
+    viewToggleBtn_.setBounds (w - 8 - ctrlW - 8 - viewW, row2y + vpad, viewW, itemH);
+    refreshButton_.setBounds (w - 8 - ctrlW,             row2y + vpad, ctrlW, itemH);
 }
 
 void StatusBarComponent::paint(juce::Graphics& g)

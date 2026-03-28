@@ -17,6 +17,7 @@ public:
     std::function<void(const juce::String& id)> onMidiOutputChanged;
     std::function<void(int id)>                 onSysExIdChanged;
     std::function<void()>                        onRefreshClicked;
+    std::function<void()>                        onViewToggled;
 
     // Update state from processor
     void setSelectedMidiInput (const juce::String& deviceId);
@@ -24,6 +25,7 @@ public:
     void setSysExId(int id);
     void setFirmwareVersion(const juce::String& version);
     void setStatus(const juce::String& text);
+    void setGridView(bool isGrid); // updates toggle button label
     void flashTx();
     void flashRx();
 
@@ -49,6 +51,7 @@ private:
     // Row 2
     juce::ComboBox   sysExIdCombo_;
     juce::Label      firmwareLabel_;
+    juce::TextButton viewToggleBtn_;
     juce::TextButton refreshButton_;
 
     void timerCallback() override; // fades LEDs

@@ -28,12 +28,16 @@ private:
     EncoderComponent leftEncoder_  { EncoderComponent::Role::PageNav,    "Page" };
     EncoderComponent rightEncoder_ { EncoderComponent::Role::ValueAdjust, "Adjust" };
 
-    std::array<PotComponent, 3> pots_;
-    int focusedPot_ = 0;
+    enum class ViewMode { Standard, Grid };
+    ViewMode viewMode_ = ViewMode::Standard;
+
+    std::array<PotComponent, 30> pots_;
+    int focusedPot_ = 0; // absolute item index 0–29
 
     void changeListenerCallback(juce::ChangeBroadcaster*) override;
     void timerCallback() override; // polls TX/RX activity for LED flashing
     void updatePage();
+    void setViewMode(ViewMode mode);
 
     // Translate device name from combo to identifier, then open ports
     void handleMidiInputSelected(const juce::String& name);

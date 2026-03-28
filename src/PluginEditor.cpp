@@ -18,6 +18,10 @@ NTPerformEditor::NTPerformEditor(NTPerformProcessor& proc)
     };
     statusBar_.onSysExIdChanged = [this](int id) { proc_.setSysExId(id); };
     statusBar_.onRefreshClicked = [this]()       { proc_.refreshAllItems(); };
+    statusBar_.onViewToggled = [this]()
+    {
+        setViewMode(viewMode_ == ViewMode::Standard ? ViewMode::Grid : ViewMode::Standard);
+    };
 
     statusBar_.setSysExId(proc_.getSysExId());
     statusBar_.setSelectedMidiInput (proc_.getSelectedMidiInputId());
@@ -30,6 +34,7 @@ NTPerformEditor::NTPerformEditor(NTPerformProcessor& proc)
     pageSelector_.onPageSelected = [this](int page)
     {
         proc_.setCurrentPage(page);
+        focusedPot_ = page * 3 + (focusedPot_ % 3);
         updatePage();
     };
     addAndMakeVisible(pageSelector_);
@@ -38,9 +43,9 @@ NTPerformEditor::NTPerformEditor(NTPerformProcessor& proc)
     leftEncoder_.onPageDelta = [this](int delta)
     {
         const int newPage = juce::jlimit(0, PageSelectorComponent::kNumPages - 1,
-                                         pageSelector_.getCurrentPage() + delta);
-        pageSelector_.setCurrentPage(newPage);
+                                         proc_.getCurrentPage() + delta);
         proc_.setCurrentPage(newPage);
+        focusedPot_ = newPage * 3 + (focusedPot_ % 3);
         updatePage();
     };
     rightEncoder_.onValueDelta = [this](int delta)
@@ -53,43 +58,40 @@ NTPerformEditor::NTPerformEditor(NTPerformProcessor& proc)
         const int newValue  = data.rangeMin +
             static_cast<int>(newFill * (data.rangeMax - data.rangeMin) + 0.5f);
         proc_.sendParamValue(data.slotIndex, data.paramNumber, newValue);
-        const int itemIndex = proc_.getCurrentPage() * 3 + focusedPot_;
-        if (auto* p = proc_.getPerfParam(itemIndex))
+        if (auto* p = proc_.getPerfParam(focusedPot_))
             p->sendValueChangedMessageToListeners(p->getValue());
     };
     addAndMakeVisible(leftEncoder_);
     addAndMakeVisible(rightEncoder_);
 
-    // Pots
+    // Pots — all 30 items; visibility managed by setViewMode / updatePage
     static const char* posLabels[] = { "Pot L", "Pot C", "Pot R" };
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < 30; ++i)
     {
         auto& pot = pots_[i];
         PotComponent::Data d;
-        d.posLabel = posLabels[i];
+        d.posLabel = posLabels[i % 3];
         pot.setData(d);
 
-        const int idx = i;
-        pot.onDragStart = [this, idx]()
+        pot.onDragStart = [this, i]()
         {
-            const int itemIndex = proc_.getCurrentPage() * 3 + idx;
-            if (auto* p = proc_.getPerfParam(itemIndex))
+            if (auto* p = proc_.getPerfParam(i))
                 p->beginChangeGesture();
         };
-        pot.onDragEnd = [this, idx]()
+        pot.onDragEnd = [this, i]()
         {
-            const int itemIndex = proc_.getCurrentPage() * 3 + idx;
-            if (auto* p = proc_.getPerfParam(itemIndex))
+            if (auto* p = proc_.getPerfParam(i))
                 p->endChangeGesture();
         };
-        pot.onValueChange = [this, idx](int slot, int param, int value, bool)
+        pot.onValueChange = [this, i](int slot, int param, int value, bool)
         {
-            focusedPot_ = idx;
+            focusedPot_ = i;
             proc_.sendParamValue(slot, param, value);
-            const int itemIndex = proc_.getCurrentPage() * 3 + idx;
-            if (auto* p = proc_.getPerfParam(itemIndex))
+            if (auto* p = proc_.getPerfParam(i))
                 p->sendValueChangedMessageToListeners(p->getValue());
         };
+        // Initially only show page 0 pots (standard mode)
+        pot.setVisible(i < 3);
         addAndMakeVisible(pot);
     }
 
@@ -121,18 +123,18 @@ void NTPerformEditor::timerCallback()
 
 void NTPerformEditor::updatePage()
 {
-    const int page           = pageSelector_.getCurrentPage();
-    const auto& model        = proc_.getModel();
-    static const char* pos[] = { "Pot L", "Pot C", "Pot R" };
+    const int page    = proc_.getCurrentPage();
+    const auto& model = proc_.getModel();
 
-    for (int i = 0; i < 3; ++i)
+    static const char* pagePos[] = { "Pot L", "Pot C", "Pot R" };
+
+    for (int i = 0; i < 30; ++i)
     {
-        const int itemIndex = page * 3 + i;
-        const auto& item    = model.getItem(itemIndex);
-        const float fill    = model.getFillFraction(itemIndex);
+        const auto& item = model.getItem(i);
+        const float fill = model.getFillFraction(i);
 
         PotComponent::Data d;
-        d.posLabel     = pos[i];
+        d.posLabel     = pagePos[i % 3];
         d.enabled      = item.enabled;
         d.isEmpty      = !item.enabled;
         d.upperLabel   = item.upperLabel[0] ? juce::String(item.upperLabel)
@@ -144,11 +146,50 @@ void NTPerformEditor::updatePage()
         d.rangeMin     = item.min;
         d.rangeMax     = item.max;
         pots_[i].setData(d);
+
+        // Visibility: in Standard mode only show the current page's 3 pots
+        if (viewMode_ == ViewMode::Standard)
+            pots_[i].setVisible(i / 3 == page);
     }
 
-    rightEncoder_.setAngle(pots_[focusedPot_].getData().fillFraction);
-    leftEncoder_.setAngle(static_cast<float>(page) /
-                          (PageSelectorComponent::kNumPages - 1));
+    if (viewMode_ == ViewMode::Standard)
+    {
+        pageSelector_.setCurrentPage(page);
+        rightEncoder_.setAngle(pots_[focusedPot_].getData().fillFraction);
+        leftEncoder_.setAngle(static_cast<float>(page) /
+                              (PageSelectorComponent::kNumPages - 1));
+    }
+}
+
+//==============================================================================
+
+void NTPerformEditor::setViewMode(ViewMode mode)
+{
+    viewMode_ = mode;
+    const bool isGrid = (mode == ViewMode::Grid);
+
+    pageSelector_.setVisible(!isGrid);
+    leftEncoder_.setVisible(!isGrid);
+    rightEncoder_.setVisible(!isGrid);
+
+    if (isGrid)
+    {
+        for (int i = 0; i < 30; ++i)
+            pots_[i].setVisible(true);
+        setResizeLimits(448, 384, 896, 1280);
+        setSize(getWidth(), StatusBarComponent::kHeight + PageSelectorComponent::kNumPages * 48);
+    }
+    else
+    {
+        const int page = proc_.getCurrentPage();
+        focusedPot_ = page * 3 + (focusedPot_ % 3);
+        for (int i = 0; i < 30; ++i)
+            pots_[i].setVisible(i / 3 == page);
+        setResizeLimits(448, 256, 896, 608);
+        setSize(getWidth(), 304);
+    }
+
+    statusBar_.setGridView(isGrid);
 }
 
 //==============================================================================
@@ -186,14 +227,43 @@ void NTPerformEditor::paint(juce::Graphics& g)
 void NTPerformEditor::resized()
 {
     auto area = getLocalBounds();
-    statusBar_.setBounds  (area.removeFromTop(StatusBarComponent::kHeight));
-    pageSelector_.setBounds(area.removeFromTop(32)); // 2×16
+    statusBar_.setBounds(area.removeFromTop(StatusBarComponent::kHeight));
 
-    const int encoderW = 80;
-    leftEncoder_.setBounds (area.removeFromLeft(encoderW));
-    rightEncoder_.setBounds(area.removeFromRight(encoderW));
+    if (viewMode_ == ViewMode::Standard)
+    {
+        pageSelector_.setBounds(area.removeFromTop(32));
 
-    const int potW = area.getWidth() / 3;
-    for (int i = 0; i < 3; ++i)
-        pots_[i].setBounds(area.removeFromLeft(i < 2 ? potW : area.getWidth()));
+        const int encoderW = 80;
+        leftEncoder_.setBounds (area.removeFromLeft(encoderW));
+        rightEncoder_.setBounds(area.removeFromRight(encoderW));
+
+        // All pots in a page share the same 3 column positions (only 3 visible at a time)
+        const int potW = area.getWidth() / 3;
+        const juce::Rectangle<int> cols[3] = {
+            area.withWidth(potW),
+            area.withLeft(area.getX() + potW).withWidth(potW),
+            area.withLeft(area.getX() + 2 * potW).withRight(area.getRight())
+        };
+        for (int i = 0; i < 30; ++i)
+            pots_[i].setBounds(cols[i % 3]);
+    }
+    else
+    {
+        // Grid: 10 rows × 3 columns
+        const int rowH = area.getHeight() / PageSelectorComponent::kNumPages;
+        const int potW = area.getWidth() / 3;
+        for (int row = 0; row < PageSelectorComponent::kNumPages; ++row)
+        {
+            const int y = area.getY() + row * rowH;
+            const int h = (row == PageSelectorComponent::kNumPages - 1)
+                              ? (area.getBottom() - y)
+                              : rowH;
+            for (int col = 0; col < 3; ++col)
+            {
+                const int x = area.getX() + col * potW;
+                const int w = (col == 2) ? (area.getRight() - x) : potW;
+                pots_[row * 3 + col].setBounds(x, y, w, h);
+            }
+        }
+    }
 }
