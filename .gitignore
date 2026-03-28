@@ -1,0 +1,14 @@
+# Build output
+build/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.user
+
+# CMake user files
+CMakeUserPresets.json
