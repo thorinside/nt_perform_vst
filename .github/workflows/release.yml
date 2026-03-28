@@ -70,6 +70,7 @@ jobs:
       (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
     env:
       VERSION: ${{ needs.setup.outputs.version }}
+      HAS_CERT: ${{ secrets.APPLE_CERTIFICATE_P12 != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -79,73 +80,63 @@ jobs:
           path: build/_deps
           key: juce-macos-${{ hashFiles('CMakeLists.txt') }}
 
-      - name: Decode certificate
-        run: echo "${{ secrets.APPLE_CERTIFICATE_P12 }}" | base64 --decode > /tmp/cert.p12
-
-      - name: Create & unlock build keychain
+      - name: Import Developer ID certificate
+        if: ${{ env.HAS_CERT == 'true' }}
         run: |
+          echo "${{ secrets.APPLE_CERTIFICATE_P12 }}" | base64 --decode > /tmp/cert.p12
           security create-keychain -p "" build.keychain
           security set-keychain-settings -lut 21600 build.keychain
           security unlock-keychain -p "" build.keychain
           security default-keychain -s build.keychain
-
-      - name: Import Developer ID certificate
-        run: |
           security import /tmp/cert.p12 \
             -k build.keychain \
             -P "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" \
             -T /usr/bin/codesign
           security set-key-partition-list -S apple-tool:,apple: -k "" build.keychain
-          echo "Identities:"
           security find-identity -v -p codesigning build.keychain
 
-      - name: Configure (universal binary, Developer ID signing)
+      - name: Configure
         run: |
+          if [ "$HAS_CERT" = "true" ]; then
+            SIGN_ID="Developer ID Application: Neal Sanche (KN424RZG26)"
+          else
+            SIGN_ID="-"
+          fi
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
-            -DCODE_SIGN_IDENTITY="Developer ID Application: Neal Sanche (KN424RZG26)" \
+            -DCODE_SIGN_IDENTITY="$SIGN_ID" \
             -DDEVELOPMENT_TEAM=KN424RZG26
 
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Zip bundles for notarization
+      - name: Notarize
+        if: ${{ env.HAS_CERT == 'true' }}
         run: |
           ditto -c -k --keepParent \
-            "build/NTPerform_artefacts/Release/VST3/NT Perform.vst3" \
+            "build/NTPerform_artefacts/Release/VST3/NTPerform.vst3" \
             /tmp/nt_perform_vst3.zip
           ditto -c -k --keepParent \
-            "build/NTPerform_artefacts/Release/AU/NT Perform.component" \
+            "build/NTPerform_artefacts/Release/AU/NTPerform.component" \
             /tmp/nt_perform_au.zip
-
-      - name: Notarize VST3
-        run: |
           xcrun notarytool submit /tmp/nt_perform_vst3.zip \
             --apple-id "${{ secrets.APPLE_ID }}" \
             --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
-            --team-id KN424RZG26 \
-            --wait
-
-      - name: Notarize AU
-        run: |
+            --team-id KN424RZG26 --wait
           xcrun notarytool submit /tmp/nt_perform_au.zip \
             --apple-id "${{ secrets.APPLE_ID }}" \
             --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
-            --team-id KN424RZG26 \
-            --wait
-
-      - name: Staple notarization tickets
-        run: |
-          xcrun stapler staple "build/NTPerform_artefacts/Release/VST3/NT Perform.vst3"
-          xcrun stapler staple "build/NTPerform_artefacts/Release/AU/NT Perform.component"
+            --team-id KN424RZG26 --wait
+          xcrun stapler staple "build/NTPerform_artefacts/Release/VST3/NTPerform.vst3"
+          xcrun stapler staple "build/NTPerform_artefacts/Release/AU/NTPerform.component"
 
       - name: Package release zip
         run: |
           mkdir -p "/tmp/nt_perform-${VERSION}-macos"
-          cp -R "build/NTPerform_artefacts/Release/VST3/NT Perform.vst3" \
+          cp -R "build/NTPerform_artefacts/Release/VST3/NTPerform.vst3" \
                "/tmp/nt_perform-${VERSION}-macos/"
-          cp -R "build/NTPerform_artefacts/Release/AU/NT Perform.component" \
+          cp -R "build/NTPerform_artefacts/Release/AU/NTPerform.component" \
                "/tmp/nt_perform-${VERSION}-macos/"
           cd /tmp
           zip -r "nt_perform-${VERSION}-macos.zip" "nt_perform-${VERSION}-macos"
@@ -194,7 +185,7 @@ jobs:
         run: |
           $dest = "nt_perform-$env:VERSION-windows"
           New-Item -ItemType Directory -Path $dest
-          Copy-Item -Recurse "build/NTPerform_artefacts/Release/VST3/NT Perform.vst3" "$dest/"
+          Copy-Item -Recurse "build/NTPerform_artefacts/Release/VST3/NTPerform.vst3" "$dest/"
           Compress-Archive -Path $dest -DestinationPath "nt_perform-$env:VERSION-windows.zip"
 
       - name: Upload to release
@@ -245,7 +236,7 @@ jobs:
       - name: Package release zip
         run: |
           mkdir -p "nt_perform-${VERSION}-linux"
-          cp -R "build/NTPerform_artefacts/Release/VST3/NT Perform.vst3" \
+          cp -R "build/NTPerform_artefacts/Release/VST3/NTPerform.vst3" \
                "nt_perform-${VERSION}-linux/"
           zip -r "nt_perform-${VERSION}-linux.zip" "nt_perform-${VERSION}-linux"
 
