@@ -61,7 +61,7 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────────────────────
   build-macos:
-    name: Build macOS (VST3 + AU, universal)
+    name: Build macOS installer (VST3 + AU, universal)
     runs-on: macos-14
     needs: [setup, create-release]
     if: |
@@ -70,7 +70,6 @@ jobs:
       (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
     env:
       VERSION: ${{ needs.setup.outputs.version }}
-      HAS_CERT: ${{ secrets.APPLE_CERTIFICATE_P12 != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -81,7 +80,6 @@ jobs:
           key: juce-macos-${{ hashFiles('CMakeLists.txt') }}
 
       - name: Import Developer ID certificate
-        if: ${{ env.HAS_CERT == 'true' }}
         run: |
           echo "${{ secrets.APPLE_CERTIFICATE_P12 }}" | base64 --decode > /tmp/cert.p12
           security create-keychain -p "" build.keychain
@@ -95,51 +93,94 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -k "" build.keychain
           security find-identity -v -p codesigning build.keychain
 
-      - name: Configure
+      - name: Configure (universal binary, Developer ID signing)
         run: |
-          if [ "$HAS_CERT" = "true" ]; then
-            SIGN_ID="Developer ID Application: Neal Sanche (KN424RZG26)"
-          else
-            SIGN_ID="-"
-          fi
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
-            -DCODE_SIGN_IDENTITY="$SIGN_ID" \
+            -DCODE_SIGN_IDENTITY="Developer ID Application: Neal Sanche (KN424RZG26)" \
             -DDEVELOPMENT_TEAM=KN424RZG26
 
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Notarize
-        if: ${{ env.HAS_CERT == 'true' }}
+      - name: Notarize plugins
         run: |
           ditto -c -k --keepParent \
             "build/NTPerform_artefacts/Release/VST3/NTPerform.vst3" \
-            /tmp/nt_perform_vst3.zip
+            /tmp/vst3.zip
           ditto -c -k --keepParent \
             "build/NTPerform_artefacts/Release/AU/NTPerform.component" \
-            /tmp/nt_perform_au.zip
-          xcrun notarytool submit /tmp/nt_perform_vst3.zip \
+            /tmp/au.zip
+          xcrun notarytool submit /tmp/vst3.zip \
             --apple-id "${{ secrets.APPLE_ID }}" \
             --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
             --team-id KN424RZG26 --wait
-          xcrun notarytool submit /tmp/nt_perform_au.zip \
+          xcrun notarytool submit /tmp/au.zip \
             --apple-id "${{ secrets.APPLE_ID }}" \
             --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
             --team-id KN424RZG26 --wait
           xcrun stapler staple "build/NTPerform_artefacts/Release/VST3/NTPerform.vst3"
           xcrun stapler staple "build/NTPerform_artefacts/Release/AU/NTPerform.component"
 
-      - name: Package release zip
+      - name: Build .pkg installer
         run: |
-          mkdir -p "/tmp/nt_perform-${VERSION}-macos"
-          cp -R "build/NTPerform_artefacts/Release/VST3/NTPerform.vst3" \
-               "/tmp/nt_perform-${VERSION}-macos/"
-          cp -R "build/NTPerform_artefacts/Release/AU/NTPerform.component" \
-               "/tmp/nt_perform-${VERSION}-macos/"
-          cd /tmp
-          zip -r "nt_perform-${VERSION}-macos.zip" "nt_perform-${VERSION}-macos"
+          VST3="build/NTPerform_artefacts/Release/VST3/NTPerform.vst3"
+          AU="build/NTPerform_artefacts/Release/AU/NTPerform.component"
+
+          mkdir -p /tmp/pkg-vst3 /tmp/pkg-au
+
+          cp -R "$VST3" /tmp/pkg-vst3/
+          cp -R "$AU"   /tmp/pkg-au/
+
+          pkgbuild \
+            --root /tmp/pkg-vst3 \
+            --install-location "/Library/Audio/Plug-Ins/VST3" \
+            --identifier "dev.nosuch.ntperform.vst3" \
+            --version "${VERSION}" \
+            /tmp/NTPerform_VST3.pkg
+
+          pkgbuild \
+            --root /tmp/pkg-au \
+            --install-location "/Library/Audio/Plug-Ins/Components" \
+            --identifier "dev.nosuch.ntperform.au" \
+            --version "${VERSION}" \
+            /tmp/NTPerform_AU.pkg
+
+          cat > /tmp/distribution.xml << 'XMLEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <installer-gui-script minSpecVersion="1">
+              <title>NT Perform</title>
+              <options customize="never" require-scripts="false" rootVolumeOnly="true"/>
+              <choices-outline>
+                  <line choice="vst3"/>
+                  <line choice="au"/>
+              </choices-outline>
+              <choice id="vst3" title="VST3 Plugin"
+                  description="Installs NT Perform VST3 to /Library/Audio/Plug-Ins/VST3/">
+                  <pkg-ref id="dev.nosuch.ntperform.vst3"/>
+              </choice>
+              <choice id="au" title="Audio Unit Plugin"
+                  description="Installs NT Perform AU to /Library/Audio/Plug-Ins/Components/">
+                  <pkg-ref id="dev.nosuch.ntperform.au"/>
+              </choice>
+              <pkg-ref id="dev.nosuch.ntperform.vst3">NTPerform_VST3.pkg</pkg-ref>
+              <pkg-ref id="dev.nosuch.ntperform.au">NTPerform_AU.pkg</pkg-ref>
+          </installer-gui-script>
+          XMLEOF
+
+          productbuild \
+            --distribution /tmp/distribution.xml \
+            --package-path /tmp \
+            "/tmp/NTPerform-${VERSION}-macOS.pkg"
+
+      - name: Notarize .pkg installer
+        run: |
+          xcrun notarytool submit "/tmp/NTPerform-${VERSION}-macOS.pkg" \
+            --apple-id "${{ secrets.APPLE_ID }}" \
+            --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
+            --team-id KN424RZG26 --wait
+          xcrun stapler staple "/tmp/NTPerform-${VERSION}-macOS.pkg"
 
       - name: Upload to release
         uses: ncipollo/release-action@v1
@@ -148,7 +189,7 @@ jobs:
           tag: ${{ needs.setup.outputs.tag }}
           allowUpdates: true
           omitBodyDuringUpdate: true
-          artifacts: "/tmp/nt_perform-${{ env.VERSION }}-macos.zip"
+          artifacts: "/tmp/NTPerform-${{ env.VERSION }}-macOS.pkg"
 
       - name: Delete build keychain
         if: always()
@@ -156,7 +197,7 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────────────────────
   build-windows:
-    name: Build Windows (VST3)
+    name: Build Windows installer (VST3)
     runs-on: windows-latest
     needs: [setup, create-release]
     if: |
@@ -174,19 +215,28 @@ jobs:
           path: build/_deps
           key: juce-windows-${{ hashFiles('CMakeLists.txt') }}
 
+      - name: Install NSIS
+        run: choco install nsis -y
+
       - name: Configure
         run: cmake -B build -G "Visual Studio 17 2022" -A x64
 
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: Package release zip
+      - name: Build NSIS installer
         shell: pwsh
         run: |
-          $dest = "nt_perform-$env:VERSION-windows"
-          New-Item -ItemType Directory -Path $dest
-          Copy-Item -Recurse "build/NTPerform_artefacts/Release/VST3/NTPerform.vst3" "$dest/"
-          Compress-Archive -Path $dest -DestinationPath "nt_perform-$env:VERSION-windows.zip"
+          $vst3 = "build\NTPerform_artefacts\Release\VST3\NTPerform.vst3"
+          $nsiScript = "scripts\windows-installer.nsi"
+
+          # Stage VST3 next to the NSI script's working dir
+          Copy-Item -Recurse $vst3 .
+
+          # Build installer (output file defined in the NSI script)
+          & "C:\Program Files (x86)\NSIS\makensis.exe" `
+            /DPRODUCT_VERSION=$env:VERSION `
+            $nsiScript
 
       - name: Upload to release
         uses: ncipollo/release-action@v1
@@ -195,7 +245,7 @@ jobs:
           tag: ${{ needs.setup.outputs.tag }}
           allowUpdates: true
           omitBodyDuringUpdate: true
-          artifacts: "nt_perform-${{ env.VERSION }}-windows.zip"
+          artifacts: "NTPerform-${{ env.VERSION }}-Windows.exe"
 
   # ─────────────────────────────────────────────────────────────────────────────
   build-linux:
@@ -233,12 +283,12 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
-      - name: Package release zip
+      - name: Package tar.gz
         run: |
-          mkdir -p "nt_perform-${VERSION}-linux"
+          mkdir -p "NTPerform-${VERSION}-Linux"
           cp -R "build/NTPerform_artefacts/Release/VST3/NTPerform.vst3" \
-               "nt_perform-${VERSION}-linux/"
-          zip -r "nt_perform-${VERSION}-linux.zip" "nt_perform-${VERSION}-linux"
+               "NTPerform-${VERSION}-Linux/"
+          tar -czf "NTPerform-${VERSION}-Linux.tar.gz" "NTPerform-${VERSION}-Linux"
 
       - name: Upload to release
         uses: ncipollo/release-action@v1
@@ -247,4 +297,4 @@ jobs:
           tag: ${{ needs.setup.outputs.tag }}
           allowUpdates: true
           omitBodyDuringUpdate: true
-          artifacts: "nt_perform-${{ env.VERSION }}-linux.zip"
+          artifacts: "NTPerform-${{ env.VERSION }}-Linux.tar.gz"
