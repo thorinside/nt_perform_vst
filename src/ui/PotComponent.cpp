@@ -8,9 +8,13 @@ PotComponent::PotComponent()
 
 void PotComponent::setData(const Data& d)
 {
-    data_              = d;
-    localFillFraction_ = d.fillFraction >= 0.0f ? d.fillFraction : 0.0f;
-    repaint();
+    data_ = d;
+    if (!isDragging_)
+    {
+        // Don't overwrite the live drag position — suppresses CC feedback jitter
+        localFillFraction_ = d.fillFraction >= 0.0f ? d.fillFraction : 0.0f;
+        repaint();
+    }
 }
 
 //==============================================================================
@@ -54,13 +58,13 @@ void PotComponent::paint(juce::Graphics& g)
         }
     }
 
-    // Labels (inside the border)
-    const auto inner = bounds.reduced(6.0f, 4.0f);
+    // Labels (inside the border) — 8px padding on all sides
+    const auto inner = bounds.reduced(8.0f, 8.0f);
     const float h    = inner.getHeight();
 
     // Position label ("Pot L" / "Pot C" / "Pot R") — top, small, secondary
     g.setColour(textSecondary);
-    g.setFont(juce::Font(juce::FontOptions{}.withHeight(10.0f)));
+    g.setFont(juce::Font(juce::FontOptions{}.withHeight(12.0f)));
     g.drawText(data_.posLabel, inner.withHeight(12.0f), juce::Justification::centredLeft);
 
     if (data_.isEmpty || !data_.enabled)
@@ -82,9 +86,9 @@ void PotComponent::paint(juce::Graphics& g)
 
     // Lower label (algorithm name) — below, smaller, secondary
     g.setColour(textSecondary);
-    g.setFont(juce::Font(juce::FontOptions{}.withHeight(9.0f)));
+    g.setFont(juce::Font(juce::FontOptions{}.withHeight(8.0f)));
     g.drawText(data_.lowerLabel,
-               inner.getX(), midY + 10.0f, inner.getWidth(), 14.0f,
+               inner.getX(), midY + 10.0f, inner.getWidth(), 12.0f,
                juce::Justification::centred, true);
 }
 
@@ -100,6 +104,7 @@ void PotComponent::mouseDown(const juce::MouseEvent& e)
     dragStartX_        = static_cast<float>(e.getPosition().x);
     dragStartFill_     = localFillFraction_;
     lastThrottleMs_    = juce::Time::currentTimeMillis();
+    if (onDragStart) onDragStart();
 }
 
 void PotComponent::mouseDrag(const juce::MouseEvent& e)
@@ -124,12 +129,22 @@ void PotComponent::mouseDrag(const juce::MouseEvent& e)
     }
 }
 
-void PotComponent::mouseUp(const juce::MouseEvent& /*e*/)
+void PotComponent::mouseUp(const juce::MouseEvent& e)
 {
     if (!isDragging_)
         return;
     isDragging_ = false;
+
+    // Single click (< 4px movement) on a boolean param (range == 1) toggles the value
+    const float totalMove = std::abs(static_cast<float>(e.getPosition().x) - dragStartX_);
+    if (totalMove < 4.0f && (data_.rangeMax - data_.rangeMin) == 1)
+    {
+        localFillFraction_ = (localFillFraction_ < 0.5f) ? 1.0f : 0.0f;
+        repaint();
+    }
+
     notifyChange(false);
+    if (onDragEnd) onDragEnd();
 }
 
 //==============================================================================

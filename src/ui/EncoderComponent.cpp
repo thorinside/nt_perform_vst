@@ -44,7 +44,7 @@ void EncoderComponent::paint(juce::Graphics& g)
 
     // Label below
     g.setColour(textCol);
-    g.setFont(juce::Font(juce::FontOptions{}.withHeight(9.0f)));
+    g.setFont(juce::Font(juce::FontOptions{}.withHeight(8.0f)));
     g.drawText(label_,
                bounds.getX(), cy + r + 2.0f,
                bounds.getWidth(), 14.0f,

@@ -12,7 +12,7 @@ static void styleLabel(juce::Label& l, const juce::String& text)
 {
     l.setText(text, juce::dontSendNotification);
     l.setColour(juce::Label::textColourId, juce::Colour(0xFF9399B2));
-    l.setFont(juce::Font(juce::FontOptions{}.withHeight(10.0f)));
+    l.setFont(juce::Font(juce::FontOptions{}.withHeight(12.0f)));
     l.setJustificationType(juce::Justification::centredRight);
 }
 
@@ -64,7 +64,7 @@ StatusBarComponent::StatusBarComponent()
 
     firmwareLabel_.setText("firmware: --", juce::dontSendNotification);
     firmwareLabel_.setColour(juce::Label::textColourId, juce::Colour(0xFF9399B2));
-    firmwareLabel_.setFont(juce::Font(juce::FontOptions{}.withHeight(11.0f)));
+    firmwareLabel_.setFont(juce::Font(juce::FontOptions{}.withHeight(12.0f)));
     firmwareLabel_.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(firmwareLabel_);
 
@@ -182,26 +182,35 @@ void StatusBarComponent::timerCallback()
 
 void StatusBarComponent::resized()
 {
-    const int h = getHeight() / 2;
-    const int w = getWidth();
+    const int w    = getWidth();
+    const int row  = kHeight / 2;  // 32px per row
+    const int itemH = 24;          // 3×8 — item height
+    const int vpad  = (row - itemH) / 2; // 4px top/bottom within each row
 
-    // Row 1: [IN lbl 20] [IN combo flex] [OUT lbl 22] [OUT combo flex] [TX● 20] [RX● 20]
-    const int ledW   = 22;
-    const int lblW   = 24;
-    const int comboW = (w - lblW * 2 - ledW * 2 - 8) / 2;
-    int x = 4;
+    // Row 1: [8][lblW IN][8][comboW][16][lblW OUT][8][comboW][8][ledArea]
+    const int lblW   = 32;  // 4×8 — wide enough for "OUT" at 12px
+    const int lGap   = 8;   // gap between label and its combo
+    const int sGap   = 16;  // gap between IN section and OUT section (1×16)
+    const int ledArea = 48; // 3×16 — space reserved for TX/RX LEDs + right margin
+    // fixed = 8 + lblW + lGap + sGap + lblW + lGap + ledArea
+    const int fixed  = 8 + lblW + lGap + sGap + lblW + lGap + ledArea; // = 160
+    const int comboW = (w - fixed) / 2;
+    int x = 8;
 
-    midiInLabel_.setBounds (x, 2, lblW, h - 4);  x += lblW;
-    midiInCombo_.setBounds (x, 2, comboW, h - 4); x += comboW + 4;
-    midiOutLabel_.setBounds(x, 2, lblW, h - 4);  x += lblW;
-    midiOutCombo_.setBounds(x, 2, comboW, h - 4);
-    // LEDs are painted in paint(), no component needed
+    midiInLabel_.setBounds (x, vpad, lblW,  itemH); x += lblW + lGap;
+    midiInCombo_.setBounds (x, vpad, comboW, itemH); x += comboW + sGap;
+    midiOutLabel_.setBounds(x, vpad, lblW,  itemH); x += lblW + lGap;
+    midiOutCombo_.setBounds(x, vpad, comboW, itemH);
 
-    // Row 2: [SysEx ID 80] [firmware label flex] [Refresh 80]
-    const int row2y = h;
-    sysExIdCombo_.setBounds (4,         row2y + 2, 80,         h - 4);
-    refreshButton_.setBounds(w - 84,    row2y + 2, 80,         h - 4);
-    firmwareLabel_.setBounds(88,        row2y + 2, w - 176,    h - 4);
+    // Row 2: [8][80 SysEx][8][flex firmware][8][80 Refresh][8]
+    const int row2y   = row;
+    const int ctrlW   = 80; // 5×16
+    const int fwX     = 8 + ctrlW + 8;
+    const int fwW     = w - fwX - 8 - ctrlW - 8;
+
+    sysExIdCombo_.setBounds(8,          row2y + vpad, ctrlW, itemH);
+    firmwareLabel_.setBounds(fwX,       row2y + vpad, fwW,   itemH);
+    refreshButton_.setBounds(w - 8 - ctrlW, row2y + vpad, ctrlW, itemH);
 }
 
 void StatusBarComponent::paint(juce::Graphics& g)
@@ -212,12 +221,12 @@ void StatusBarComponent::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xFF313244));
     g.drawHorizontalLine(getHeight() / 2, 0.0f, static_cast<float>(getWidth()));
 
-    // TX/RX LEDs (top-right of row 1)
-    const int h      = getHeight() / 2;
-    const int ledSize = 10;
-    const int ledY   = (h - ledSize) / 2;
-    const int txX    = getWidth() - 22;
-    const int rxX    = getWidth() - 44;
+    // TX/RX LEDs — top-right of row 1, within the 48px LED area
+    const int row    = kHeight / 2; // 32
+    const int ledSize = 12;         // 3×4
+    const int ledY   = (row - ledSize) / 2; // centred in 32px row = 10
+    const int txX    = getWidth() - 8 - ledSize;        // 8px right margin
+    const int rxX    = getWidth() - 8 - ledSize - 8 - ledSize; // 8px gap between
 
     auto drawLed = [&](int x, int brightness, juce::Colour onColour)
     {
@@ -235,11 +244,9 @@ void StatusBarComponent::paint(juce::Graphics& g)
     drawLed(rxX, rxBrightness_.load(), juce::Colour(0xFF00FF88));
     drawLed(txX, txBrightness_.load(), juce::Colour(0xFFFFD700));
 
-    // LED labels
+    // LED labels (8px font, below LED)
     g.setFont(juce::Font(juce::FontOptions{}.withHeight(8.0f)));
     g.setColour(juce::Colour(0xFF585B70));
-    g.drawText("RX", rxX - 1, ledY + ledSize + 1, ledSize + 2, 9,
-               juce::Justification::centred);
-    g.drawText("TX", txX - 1, ledY + ledSize + 1, ledSize + 2, 9,
-               juce::Justification::centred);
+    g.drawText("RX", rxX, ledY + ledSize + 2, ledSize, 8, juce::Justification::centred);
+    g.drawText("TX", txX, ledY + ledSize + 2, ledSize, 8, juce::Justification::centred);
 }

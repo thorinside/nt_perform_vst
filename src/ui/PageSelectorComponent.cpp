@@ -41,9 +41,9 @@ void PageSelectorComponent::setCurrentPage(int page)
 
 void PageSelectorComponent::resized()
 {
-    const int w = getWidth() / kNumPages;
+    const int btnW = getWidth() / kNumPages;
     for (int i = 0; i < kNumPages; ++i)
-        buttons_[i].setBounds(i * w, 0, w, getHeight());
+        buttons_[i].setBounds(i * btnW, 4, btnW, getHeight() - 8); // 4px top/bottom margin
 }
 
 void PageSelectorComponent::paint(juce::Graphics& g)

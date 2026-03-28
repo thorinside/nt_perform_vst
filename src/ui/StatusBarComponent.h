@@ -30,7 +30,7 @@ public:
     // Rebuild device lists (call after MIDI device changes)
     void refreshDeviceLists();
 
-    static constexpr int kHeight = 60; // total height for both rows
+    static constexpr int kHeight = 64; // total height for both rows (4×16)
 
     void resized() override;
     void paint(juce::Graphics& g) override;

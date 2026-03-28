@@ -31,6 +31,8 @@ public:
 
     // Called when the user drags to a new value.
     std::function<void(int slot, int param, int value, bool isDragging)> onValueChange;
+    std::function<void()> onDragStart; // called on mouseDown (for gesture begin)
+    std::function<void()> onDragEnd;   // called on mouseUp   (for gesture end)
 
     void paint(juce::Graphics& g) override;
     void resized() override {}

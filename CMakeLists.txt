@@ -42,6 +42,7 @@ juce_add_plugin(NTPerform
 
 target_sources(NTPerform PRIVATE
     src/PluginProcessor.cpp
+    src/PerfPageParam.cpp
     src/PluginEditor.cpp
     src/protocol/DistingNTProtocol.cpp
     src/protocol/SysExQueue.cpp

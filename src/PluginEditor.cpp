@@ -3,9 +3,9 @@
 NTPerformEditor::NTPerformEditor(NTPerformProcessor& proc)
     : AudioProcessorEditor(&proc), proc_(proc)
 {
-    setSize(560, 300);
+    setSize(560, 304);          // 35×16, 19×16
     setResizable(true, false);
-    setResizeLimits(440, 260, 900, 600);
+    setResizeLimits(448, 256, 896, 608); // all multiples of 16
 
     // Status bar
     statusBar_.onMidiInputChanged  = [this](const juce::String& name)
@@ -53,6 +53,9 @@ NTPerformEditor::NTPerformEditor(NTPerformProcessor& proc)
         const int newValue  = data.rangeMin +
             static_cast<int>(newFill * (data.rangeMax - data.rangeMin) + 0.5f);
         proc_.sendParamValue(data.slotIndex, data.paramNumber, newValue);
+        const int itemIndex = proc_.getCurrentPage() * 3 + focusedPot_;
+        if (auto* p = proc_.getPerfParam(itemIndex))
+            p->sendValueChangedMessageToListeners(p->getValue());
     };
     addAndMakeVisible(leftEncoder_);
     addAndMakeVisible(rightEncoder_);
@@ -67,10 +70,25 @@ NTPerformEditor::NTPerformEditor(NTPerformProcessor& proc)
         pot.setData(d);
 
         const int idx = i;
+        pot.onDragStart = [this, idx]()
+        {
+            const int itemIndex = proc_.getCurrentPage() * 3 + idx;
+            if (auto* p = proc_.getPerfParam(itemIndex))
+                p->beginChangeGesture();
+        };
+        pot.onDragEnd = [this, idx]()
+        {
+            const int itemIndex = proc_.getCurrentPage() * 3 + idx;
+            if (auto* p = proc_.getPerfParam(itemIndex))
+                p->endChangeGesture();
+        };
         pot.onValueChange = [this, idx](int slot, int param, int value, bool)
         {
             focusedPot_ = idx;
             proc_.sendParamValue(slot, param, value);
+            const int itemIndex = proc_.getCurrentPage() * 3 + idx;
+            if (auto* p = proc_.getPerfParam(itemIndex))
+                p->sendValueChangedMessageToListeners(p->getValue());
         };
         addAndMakeVisible(pot);
     }
@@ -169,7 +187,7 @@ void NTPerformEditor::resized()
 {
     auto area = getLocalBounds();
     statusBar_.setBounds  (area.removeFromTop(StatusBarComponent::kHeight));
-    pageSelector_.setBounds(area.removeFromTop(36));
+    pageSelector_.setBounds(area.removeFromTop(32)); // 2×16
 
     const int encoderW = 80;
     leftEncoder_.setBounds (area.removeFromLeft(encoderW));

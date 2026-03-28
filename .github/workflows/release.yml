@@ -1,0 +1,259 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  setup:
+    name: Setup Build Info
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      tag: ${{ steps.get_version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version and tag
+        id: get_version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "tag=$TAG  version=$VERSION"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: setup
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        run: |
+          chmod +x ./scripts/release-notes.sh
+          ./scripts/release-notes.sh "${{ needs.setup.outputs.tag }}"
+
+      - uses: ncipollo/release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ needs.setup.outputs.tag }}
+          name: "${{ needs.setup.outputs.tag }}"
+          bodyFile: release_notes.md
+          generateReleaseNotes: false
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-macos:
+    name: Build macOS (VST3 + AU, universal)
+    runs-on: macos-14
+    needs: [setup, create-release]
+    if: |
+      always() &&
+      needs.setup.result == 'success' &&
+      (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
+    env:
+      VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache JUCE source
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-macos-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Decode certificate
+        run: echo "${{ secrets.APPLE_CERTIFICATE_P12 }}" | base64 --decode > /tmp/cert.p12
+
+      - name: Create & unlock build keychain
+        run: |
+          security create-keychain -p "" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "" build.keychain
+          security default-keychain -s build.keychain
+
+      - name: Import Developer ID certificate
+        run: |
+          security import /tmp/cert.p12 \
+            -k build.keychain \
+            -P "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "" build.keychain
+          echo "Identities:"
+          security find-identity -v -p codesigning build.keychain
+
+      - name: Configure (universal binary, Developer ID signing)
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCODE_SIGN_IDENTITY="Developer ID Application: Neal Sanche (KN424RZG26)" \
+            -DDEVELOPMENT_TEAM=KN424RZG26
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Zip bundles for notarization
+        run: |
+          ditto -c -k --keepParent \
+            "build/NTPerform_artefacts/Release/VST3/NT Perform.vst3" \
+            /tmp/nt_perform_vst3.zip
+          ditto -c -k --keepParent \
+            "build/NTPerform_artefacts/Release/AU/NT Perform.component" \
+            /tmp/nt_perform_au.zip
+
+      - name: Notarize VST3
+        run: |
+          xcrun notarytool submit /tmp/nt_perform_vst3.zip \
+            --apple-id "${{ secrets.APPLE_ID }}" \
+            --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
+            --team-id KN424RZG26 \
+            --wait
+
+      - name: Notarize AU
+        run: |
+          xcrun notarytool submit /tmp/nt_perform_au.zip \
+            --apple-id "${{ secrets.APPLE_ID }}" \
+            --password "${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" \
+            --team-id KN424RZG26 \
+            --wait
+
+      - name: Staple notarization tickets
+        run: |
+          xcrun stapler staple "build/NTPerform_artefacts/Release/VST3/NT Perform.vst3"
+          xcrun stapler staple "build/NTPerform_artefacts/Release/AU/NT Perform.component"
+
+      - name: Package release zip
+        run: |
+          mkdir -p "/tmp/nt_perform-${VERSION}-macos"
+          cp -R "build/NTPerform_artefacts/Release/VST3/NT Perform.vst3" \
+               "/tmp/nt_perform-${VERSION}-macos/"
+          cp -R "build/NTPerform_artefacts/Release/AU/NT Perform.component" \
+               "/tmp/nt_perform-${VERSION}-macos/"
+          cd /tmp
+          zip -r "nt_perform-${VERSION}-macos.zip" "nt_perform-${VERSION}-macos"
+
+      - name: Upload to release
+        uses: ncipollo/release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ needs.setup.outputs.tag }}
+          allowUpdates: true
+          omitBodyDuringUpdate: true
+          artifacts: "/tmp/nt_perform-${{ env.VERSION }}-macos.zip"
+
+      - name: Delete build keychain
+        if: always()
+        run: security delete-keychain build.keychain || true
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-windows:
+    name: Build Windows (VST3)
+    runs-on: windows-latest
+    needs: [setup, create-release]
+    if: |
+      always() &&
+      needs.setup.result == 'success' &&
+      (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
+    env:
+      VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache JUCE source
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-windows-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package release zip
+        shell: pwsh
+        run: |
+          $dest = "nt_perform-$env:VERSION-windows"
+          New-Item -ItemType Directory -Path $dest
+          Copy-Item -Recurse "build/NTPerform_artefacts/Release/VST3/NT Perform.vst3" "$dest/"
+          Compress-Archive -Path $dest -DestinationPath "nt_perform-$env:VERSION-windows.zip"
+
+      - name: Upload to release
+        uses: ncipollo/release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ needs.setup.outputs.tag }}
+          allowUpdates: true
+          omitBodyDuringUpdate: true
+          artifacts: "nt_perform-${{ env.VERSION }}-windows.zip"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-linux:
+    name: Build Linux (VST3)
+    runs-on: ubuntu-latest
+    needs: [setup, create-release]
+    if: |
+      always() &&
+      needs.setup.result == 'success' &&
+      (needs.create-release.result == 'success' || needs.create-release.result == 'skipped')
+    env:
+      VERSION: ${{ needs.setup.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache JUCE source
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-linux-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Install JUCE dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake ninja-build \
+            libasound2-dev \
+            libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev \
+            libfreetype6-dev libfontconfig1-dev \
+            mesa-common-dev libglu1-mesa-dev
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Package release zip
+        run: |
+          mkdir -p "nt_perform-${VERSION}-linux"
+          cp -R "build/NTPerform_artefacts/Release/VST3/NT Perform.vst3" \
+               "nt_perform-${VERSION}-linux/"
+          zip -r "nt_perform-${VERSION}-linux.zip" "nt_perform-${VERSION}-linux"
+
+      - name: Upload to release
+        uses: ncipollo/release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ needs.setup.outputs.tag }}
+          allowUpdates: true
+          omitBodyDuringUpdate: true
+          artifacts: "nt_perform-${{ env.VERSION }}-linux.zip"

@@ -4,6 +4,13 @@
 NTPerformProcessor::NTPerformProcessor()
     : AudioProcessor(BusesProperties())
 {
+    for (int i = 0; i < PerformPageModel::kTotalItems; ++i)
+        perfParams_[i] = new PerfPageParam(*this, model_, i);
+
+    // addParameter transfers ownership to the base class.
+    for (auto* p : perfParams_)
+        addParameter(p);
+
     startTimerHz(20); // 50ms
 }
 
@@ -273,6 +280,7 @@ void NTPerformProcessor::timerCallback()
                 {
                     const int value = CcReverseLookup::convertCcToValue(*target, ev.value);
                     model_.setParamValue(target->slotIndex, target->paramNumber, value);
+                    perfParams_[target->itemIndex]->notifyValueChanged();
                     changed = true;
                 }
             };
@@ -425,6 +433,7 @@ void NTPerformProcessor::startPhase2()
     if (mappingsPending_ == 0)
     {
         refreshPhase_.store(0);
+        updateHostDisplay(ChangeDetails{}.withParameterInfoChanged(true));
         sendChangeMessage();
         return;
     }
@@ -462,6 +471,7 @@ void NTPerformProcessor::enqueueMappingRequest(int itemIndex)
         if (--mappingsPending_ <= 0)
         {
             refreshPhase_.store(0);
+            updateHostDisplay(ChangeDetails{}.withParameterInfoChanged(true));
             sendChangeMessage();
         }
     };
@@ -471,6 +481,7 @@ void NTPerformProcessor::enqueueMappingRequest(int itemIndex)
         if (--mappingsPending_ <= 0)
         {
             refreshPhase_.store(0);
+            updateHostDisplay(ChangeDetails{}.withParameterInfoChanged(true));
             sendChangeMessage();
         }
     };

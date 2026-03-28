@@ -9,6 +9,7 @@
 #include "protocol/SysExQueue.h"
 #include "protocol/CcReverseLookup.h"
 #include "model/PerformPageModel.h"
+#include "PerfPageParam.h"
 
 class NTPerformProcessor : public juce::AudioProcessor,
                            public juce::ChangeBroadcaster,
@@ -66,6 +67,12 @@ public:
     int               getCurrentPage() const  { return currentPage_.load(); }
     void              setCurrentPage(int p)   { currentPage_.store(p); }
     juce::String      getFirmwareVersion() const;
+    PerfPageParam*    getPerfParam(int index) const
+    {
+        if (index >= 0 && index < PerformPageModel::kTotalItems)
+            return perfParams_[index];
+        return nullptr;
+    }
 
     // Activity: true if TX or RX fired in the last timer tick
     bool hasTxActivity() const { return txActivity_.load(); }
@@ -75,6 +82,9 @@ private:
     PerformPageModel model_;
     SysExQueue       queue_;
     CcReverseLookup  ccLookup_;
+
+    // Automatable parameters — one per perf page slot, owned by JUCE base class.
+    std::array<PerfPageParam*, PerformPageModel::kTotalItems> perfParams_ {};
 
     std::atomic<int>  sysExId_     { 1 };
     std::atomic<int>  currentPage_ { 0 };
