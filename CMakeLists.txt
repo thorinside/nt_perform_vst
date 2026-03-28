@@ -65,6 +65,7 @@ target_compile_definitions(NTPerform PUBLIC
 
 target_link_libraries(NTPerform PRIVATE
     juce::juce_audio_processors
+    juce::juce_audio_devices
     juce::juce_gui_basics
     juce::juce_events
     juce::juce_audio_utils

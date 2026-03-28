@@ -43,6 +43,15 @@ juce::MidiMessage buildSetParamValue(int sysExId, int slot, int param, int value
     return juce::MidiMessage(bytes.data(), static_cast<int>(bytes.size()));
 }
 
+juce::MidiMessage buildRequestVersion(int sysExId)
+{
+    auto hdr = buildHeader(sysExId);
+    std::vector<uint8_t> bytes = hdr;
+    bytes.push_back(kCmdRequestVersion);
+    bytes.push_back(kSysExEnd);
+    return juce::MidiMessage(bytes.data(), static_cast<int>(bytes.size()));
+}
+
 juce::MidiMessage buildRequestMappings(int sysExId, int slot, int param)
 {
     auto hdr = buildHeader(sysExId);
@@ -216,6 +225,18 @@ bool parseMappingsResponse(const uint8_t* payload, int len,
     }
 
     return true;
+}
+
+juce::String parseMessageResponse(const uint8_t* payload, int len)
+{
+    if (len < 1)
+        return {};
+    // Read first null-terminated ASCII string
+    int i = 0;
+    juce::String result;
+    while (i < len && payload[i] != 0)
+        result += static_cast<char>(payload[i++]);
+    return result;
 }
 
 } // namespace DistingNT

@@ -23,6 +23,8 @@ constexpr uint8_t kCmdSetPerfPageItem     = 0x58;
 constexpr uint8_t kCmdRequestParamValue   = 0x45;
 constexpr uint8_t kCmdSetParamValue       = 0x46;
 constexpr uint8_t kCmdRequestMappings     = 0x4B;
+constexpr uint8_t kCmdRequestVersion      = 0x22;
+constexpr uint8_t kCmdRespMessage         = 0x32; // firmware version response
 
 //==============================================================================
 // Encoding / Decoding
@@ -78,6 +80,9 @@ juce::MidiMessage buildSetParamValue(int sysExId, int slot, int param, int value
 
 // SysEx 0x4B — request mapping data for a parameter
 juce::MidiMessage buildRequestMappings(int sysExId, int slot, int param);
+
+// SysEx 0x22 — request firmware version string
+juce::MidiMessage buildRequestVersion(int sysExId);
 
 //==============================================================================
 // Parsed message envelope
@@ -138,5 +143,9 @@ struct MappingData
 // for CC reverse lookup. Based on PackedMappingData v5 in nt_helper.
 bool parseMappingsResponse(const uint8_t* payload, int len,
                            MappingData& out);
+
+// Parse a 0x32 (respMessage) payload — null-terminated ASCII firmware version.
+// Returns the version string (e.g. "v1.25"), or empty string on failure.
+juce::String parseMessageResponse(const uint8_t* payload, int len);
 
 } // namespace DistingNT

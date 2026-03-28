@@ -4,25 +4,154 @@
 NTPerformProcessor::NTPerformProcessor()
     : AudioProcessor(BusesProperties())
 {
-    // Timer drives the queue timeout checks and CC fifo draining
     startTimerHz(20); // 50ms
 }
 
 NTPerformProcessor::~NTPerformProcessor()
 {
     stopTimer();
+    juce::ScopedLock sl(deviceLock_);
+    midiInput_.reset();
+    midiOutput_.reset();
 }
 
 //==============================================================================
-// processBlock — runs on the audio thread
+// Direct MIDI device management
+//==============================================================================
+
+void NTPerformProcessor::openMidiDevices(const juce::String& inputId,
+                                          const juce::String& outputId)
+{
+    {
+        juce::ScopedLock sl(deviceLock_);
+        midiInput_.reset();
+        midiOutput_.reset();
+
+        if (inputId.isNotEmpty())
+            midiInput_ = juce::MidiInput::openDevice(inputId, this);
+
+        if (outputId.isNotEmpty())
+            midiOutput_ = juce::MidiOutput::openDevice(outputId);
+
+        selectedInputId_  = inputId;
+        selectedOutputId_ = outputId;
+
+        if (midiInput_)
+            midiInput_->start();
+    }
+
+    refreshAllItems();
+}
+
+juce::String NTPerformProcessor::getSelectedMidiInputId() const
+{
+    juce::ScopedLock sl(deviceLock_);
+    return selectedInputId_;
+}
+
+juce::String NTPerformProcessor::getSelectedMidiOutputId() const
+{
+    juce::ScopedLock sl(deviceLock_);
+    return selectedOutputId_;
+}
+
+juce::String NTPerformProcessor::getFirmwareVersion() const
+{
+    juce::ScopedLock sl(fwVersionLock_);
+    return firmwareVersion_;
+}
+
+//==============================================================================
+// Send MIDI: direct output if available, else buffered for processBlock
+//==============================================================================
+
+void NTPerformProcessor::sendMidi(const juce::MidiMessage& msg)
+{
+    txActivity_.store(true);
+
+    juce::ScopedLock sl(deviceLock_);
+    if (midiOutput_)
+    {
+        midiOutput_->sendMessageNow(msg);
+    }
+    else
+    {
+        juce::ScopedLock ol(outgoingLock_);
+        pendingOutgoing_    = msg;
+        hasPendingOutgoing_ = true;
+    }
+}
+
+//==============================================================================
+// MidiInputCallback — background thread
+//==============================================================================
+
+void NTPerformProcessor::handleIncomingMidiMessage(juce::MidiInput*,
+                                                    const juce::MidiMessage& msg)
+{
+    // Route through the same path as processBlock but from the direct input
+    rxActivity_.store(true);
+
+    if (msg.isSysEx())
+    {
+        // Serialise into the lock-free SysEx fifo for message-thread processing
+        const int msgSize = msg.getRawDataSize();
+        const int needed  = 2 + msgSize; // 2-byte length prefix
+        int s1, b1, s2, b2;
+        sysexFifo_.prepareToWrite(needed, s1, b1, s2, b2);
+        if (b1 + b2 >= needed)
+        {
+            // Write length (big-endian 16-bit)
+            auto writeByte = [&](int pos, uint8_t byte)
+            {
+                const int wrapped = pos % kSysExFifoSize;
+                if (pos < s1 + b1)
+                    sysexBuffer_[s1 + (pos - s1)] = byte;
+                else
+                    sysexBuffer_[s2 + (pos - (s1 + b1))] = byte;
+                (void)wrapped;
+            };
+            // Simpler: just use linear write since messages are small
+            // Pack into a temporary and copy
+            std::vector<uint8_t> tmp(needed);
+            tmp[0] = static_cast<uint8_t>((msgSize >> 8) & 0xFF);
+            tmp[1] = static_cast<uint8_t>(msgSize & 0xFF);
+            std::memcpy(tmp.data() + 2, msg.getRawData(), msgSize);
+
+            int written = 0;
+            for (int i = 0; i < b1 && written < needed; ++i, ++written)
+                sysexBuffer_[s1 + i] = tmp[written];
+            for (int i = 0; i < b2 && written < needed; ++i, ++written)
+                sysexBuffer_[s2 + i] = tmp[written];
+
+            sysexFifo_.finishedWrite(needed);
+        }
+    }
+    else if (msg.isController())
+    {
+        int s1, b1, s2, b2;
+        ccFifo_.prepareToWrite(1, s1, b1, s2, b2);
+        const int slot = (b1 > 0) ? s1 : (b2 > 0 ? s2 : -1);
+        if (slot >= 0)
+        {
+            ccBuffer_[slot] = { msg.getChannel() - 1,
+                                msg.getControllerNumber(),
+                                msg.getControllerValue() };
+            ccFifo_.finishedWrite(b1 > 0 ? b1 : b2);
+        }
+    }
+}
+
+//==============================================================================
+// processBlock — audio thread (DAW routing fallback)
 //==============================================================================
 
 void NTPerformProcessor::processBlock(juce::AudioBuffer<float>& /*audio*/,
-                                      juce::MidiBuffer& midi)
+                                       juce::MidiBuffer& midi)
 {
-    // 1. Inject any outgoing SysEx message
+    // Inject queued outgoing message (DAW-routing fallback only)
     {
-        juce::ScopedLock sl(outgoingLock_);
+        juce::ScopedLock ol(outgoingLock_);
         if (hasPendingOutgoing_)
         {
             midi.addEvent(pendingOutgoing_, 0);
@@ -30,55 +159,104 @@ void NTPerformProcessor::processBlock(juce::AudioBuffer<float>& /*audio*/,
         }
     }
 
-    // 2. Also drain the queue for the next outgoing message
-    juce::MidiMessage outMsg;
-    if (queue_.tryDequeueNext(outMsg))
+    // Drain queue for next outgoing (DAW-routing fallback)
     {
-        midi.addEvent(outMsg, 0);
+        juce::ScopedLock sl(deviceLock_);
+        if (!midiOutput_)
+        {
+            juce::MidiMessage outMsg;
+            if (queue_.tryDequeueNext(outMsg))
+            {
+                txActivity_.store(true);
+                midi.addEvent(outMsg, 0);
+            }
+        }
     }
 
-    // 3. Scan incoming MIDI
+    // Scan incoming MIDI from DAW
     for (const auto meta : midi)
     {
         const auto& msg = meta.getMessage();
-
-        if (msg.isSysEx())
+        if (msg.isSysEx() || msg.isController())
         {
-            DistingNT::ParsedMessage parsed;
-            if (DistingNT::tryParse(msg, sysExId_.load(), parsed))
+            rxActivity_.store(true);
+            if (msg.isSysEx())
             {
-                queue_.handleIncoming(parsed.commandByte,
-                                      parsed.payload,
-                                      parsed.payloadLen);
+                DistingNT::ParsedMessage parsed;
+                if (DistingNT::tryParse(msg, sysExId_.load(), parsed))
+                    queue_.handleIncoming(parsed.commandByte, parsed.payload, parsed.payloadLen);
             }
-        }
-        else if (msg.isController())
-        {
-            // Push to lock-free ring buffer for message-thread processing
-            int s1, b1, s2, b2;
-            ccFifo_.prepareToWrite(1, s1, b1, s2, b2);
-            const int slot = (b1 > 0) ? s1 : (b2 > 0 ? s2 : -1);
-            if (slot >= 0)
+            else if (msg.isController())
             {
-                ccBuffer_[slot] = { msg.getChannel() - 1,   // 0-based
-                                    msg.getControllerNumber(),
-                                    msg.getControllerValue() };
-                ccFifo_.finishedWrite(b1 > 0 ? b1 : b2);
+                int s1, b1, s2, b2;
+                ccFifo_.prepareToWrite(1, s1, b1, s2, b2);
+                const int slot = (b1 > 0) ? s1 : (b2 > 0 ? s2 : -1);
+                if (slot >= 0)
+                {
+                    ccBuffer_[slot] = { msg.getChannel() - 1,
+                                        msg.getControllerNumber(),
+                                        msg.getControllerValue() };
+                    ccFifo_.finishedWrite(b1 > 0 ? b1 : b2);
+                }
             }
         }
     }
 }
 
 //==============================================================================
-// timerCallback — runs on the message thread
+// timerCallback — message thread (50ms)
 //==============================================================================
 
 void NTPerformProcessor::timerCallback()
 {
-    // 1. Drive timeout logic
+    // 1. Drain direct SysEx fifo (from MidiInputCallback)
+    {
+        const int numReady = sysexFifo_.getNumReady();
+        if (numReady >= 2)
+        {
+            // Read in chunks, reassemble messages
+            std::vector<uint8_t> buf(numReady);
+            int s1, b1, s2, b2;
+            sysexFifo_.prepareToRead(numReady, s1, b1, s2, b2);
+            int idx = 0;
+            for (int i = 0; i < b1; ++i) buf[idx++] = sysexBuffer_[s1 + i];
+            for (int i = 0; i < b2; ++i) buf[idx++] = sysexBuffer_[s2 + i];
+            sysexFifo_.finishedRead(b1 + b2);
+
+            int pos = 0;
+            while (pos + 2 <= numReady)
+            {
+                const int msgSize = (buf[pos] << 8) | buf[pos + 1];
+                pos += 2;
+                if (pos + msgSize > numReady) break;
+                const juce::MidiMessage msg(buf.data() + pos, msgSize);
+                pos += msgSize;
+
+                DistingNT::ParsedMessage parsed;
+                if (DistingNT::tryParse(msg, sysExId_.load(), parsed))
+                    queue_.handleIncoming(parsed.commandByte, parsed.payload, parsed.payloadLen);
+            }
+        }
+    }
+
+    // 2. Drive queue timeouts
     queue_.tick();
 
-    // 2. Drain CC events and update model
+    // 3. If direct output open, drain queue and send
+    {
+        juce::ScopedLock sl(deviceLock_);
+        if (midiOutput_)
+        {
+            juce::MidiMessage outMsg;
+            if (queue_.tryDequeueNext(outMsg))
+            {
+                txActivity_.store(true);
+                midiOutput_->sendMessageNow(outMsg);
+            }
+        }
+    }
+
+    // 4. Drain CC events
     {
         const int numReady = ccFifo_.getNumReady();
         if (numReady > 0)
@@ -87,7 +265,7 @@ void NTPerformProcessor::timerCallback()
             ccFifo_.prepareToRead(numReady, s1, b1, s2, b2);
             bool changed = false;
 
-            auto processCcSlot = [&](int slot)
+            auto processCc = [&](int slot)
             {
                 const auto& ev = ccBuffer_[slot];
                 const auto* target = ccLookup_.find(ev.channel, ev.cc);
@@ -99,18 +277,21 @@ void NTPerformProcessor::timerCallback()
                 }
             };
 
-            for (int i = 0; i < b1; ++i) processCcSlot(s1 + i);
-            for (int i = 0; i < b2; ++i) processCcSlot(s2 + i);
-
+            for (int i = 0; i < b1; ++i) processCc(s1 + i);
+            for (int i = 0; i < b2; ++i) processCc(s2 + i);
             ccFifo_.finishedRead(b1 + b2);
             if (changed)
                 sendChangeMessage();
         }
     }
+
+    // 5. Clear activity flags after editor has had a chance to read them
+    txActivity_.store(false);
+    rxActivity_.store(false);
 }
 
 //==============================================================================
-// Protocol control
+// Refresh sequence
 //==============================================================================
 
 void NTPerformProcessor::refreshAllItems()
@@ -118,7 +299,11 @@ void NTPerformProcessor::refreshAllItems()
     queue_.clear();
     ccLookup_.clear();
 
-    // Reset model loaded state
+    {
+        juce::ScopedLock sl(fwVersionLock_);
+        firmwareVersion_ = "querying...";
+    }
+
     for (int i = 0; i < PerformPageModel::kTotalItems; ++i)
     {
         PerformancePageItem empty;
@@ -128,9 +313,37 @@ void NTPerformProcessor::refreshAllItems()
 
     loadProgress_.store(0);
     refreshPhase_.store(1);
-
-    startPhase1();
     sendChangeMessage();
+
+    // First: request firmware version, then chain into perf page items
+    SysExQueue::Request req;
+    req.message             = DistingNT::buildRequestVersion(sysExId_.load());
+    req.expectedResponseCmd = DistingNT::kCmdRespMessage;
+    req.matchItemIndex      = -1;
+
+    req.onResponse = [this](const uint8_t* payload, int len)
+    {
+        const juce::String version = DistingNT::parseMessageResponse(payload, len);
+        {
+            juce::ScopedLock sl(fwVersionLock_);
+            firmwareVersion_ = version.isEmpty() ? "unknown" : version;
+        }
+        sendChangeMessage();
+
+        juce::MessageManager::callAsync([this]() { startPhase1(); });
+    };
+
+    req.onTimeout = [this]()
+    {
+        {
+            juce::ScopedLock sl(fwVersionLock_);
+            firmwareVersion_ = "no response";
+        }
+        sendChangeMessage();
+        juce::MessageManager::callAsync([this]() { startPhase1(); });
+    };
+
+    queue_.enqueue(std::move(req));
 }
 
 void NTPerformProcessor::startPhase1()
@@ -142,7 +355,6 @@ void NTPerformProcessor::enqueueItemRequest(int itemIndex)
 {
     if (itemIndex >= PerformPageModel::kTotalItems)
     {
-        // Phase 1 complete — move to phase 2
         refreshPhase_.store(2);
         startPhase2();
         return;
@@ -171,8 +383,6 @@ void NTPerformProcessor::enqueueItemRequest(int itemIndex)
             loadProgress_.fetch_add(1);
             sendChangeMessage();
         }
-
-        // Chain to next item (called under queue lock — keep light)
         juce::MessageManager::callAsync([this, itemIndex]()
         {
             enqueueItemRequest(itemIndex + 1);
@@ -181,7 +391,6 @@ void NTPerformProcessor::enqueueItemRequest(int itemIndex)
 
     req.onTimeout = [this, itemIndex]()
     {
-        // Skip this item and continue
         loadProgress_.fetch_add(1);
         juce::MessageManager::callAsync([this, itemIndex]()
         {
@@ -190,18 +399,28 @@ void NTPerformProcessor::enqueueItemRequest(int itemIndex)
     };
 
     queue_.enqueue(std::move(req));
+
+    // Send immediately if direct output is open
+    {
+        juce::ScopedLock sl(deviceLock_);
+        if (midiOutput_)
+        {
+            juce::MidiMessage outMsg;
+            if (queue_.tryDequeueNext(outMsg))
+            {
+                txActivity_.store(true);
+                midiOutput_->sendMessageNow(outMsg);
+            }
+        }
+    }
 }
 
 void NTPerformProcessor::startPhase2()
 {
-    // Find enabled items and query their CC mappings
     mappingsPending_ = 0;
     for (int i = 0; i < PerformPageModel::kTotalItems; ++i)
-    {
-        const auto& item = model_.getItem(i);
-        if (item.enabled)
+        if (model_.getItem(i).enabled)
             ++mappingsPending_;
-    }
 
     if (mappingsPending_ == 0)
     {
@@ -211,11 +430,8 @@ void NTPerformProcessor::startPhase2()
     }
 
     for (int i = 0; i < PerformPageModel::kTotalItems; ++i)
-    {
-        const auto& item = model_.getItem(i);
-        if (item.enabled)
+        if (model_.getItem(i).enabled)
             enqueueMappingRequest(i);
-    }
 }
 
 void NTPerformProcessor::enqueueMappingRequest(int itemIndex)
@@ -227,28 +443,23 @@ void NTPerformProcessor::enqueueMappingRequest(int itemIndex)
                                                                item.slotIndex,
                                                                item.parameterNumber);
     req.expectedResponseCmd = DistingNT::kCmdRequestMappings;
-    req.matchItemIndex      = -1; // any 0x4B response — the slot/param in payload identifies it
+    req.matchItemIndex      = -1;
 
     req.onResponse = [this, itemIndex](const uint8_t* payload, int len)
     {
         DistingNT::MappingData md;
-        if (DistingNT::parseMappingsResponse(payload, len, md))
+        if (DistingNT::parseMappingsResponse(payload, len, md) && md.enabled && md.midiCC >= 0)
         {
-            if (md.enabled && md.midiCC >= 0)
-            {
-                const auto& item = model_.getItem(itemIndex);
-                CcReverseLookup::CcTarget target;
-                target.itemIndex   = itemIndex;
-                target.slotIndex   = item.slotIndex;
-                target.paramNumber = item.parameterNumber;
-                target.paramMin    = item.min;
-                target.paramMax    = item.max;
-                ccLookup_.add(md.midiChannel, md.midiCC, target);
-            }
+            const auto& item = model_.getItem(itemIndex);
+            CcReverseLookup::CcTarget target;
+            target.itemIndex   = itemIndex;
+            target.slotIndex   = item.slotIndex;
+            target.paramNumber = item.parameterNumber;
+            target.paramMin    = item.min;
+            target.paramMax    = item.max;
+            ccLookup_.add(md.midiChannel, md.midiCC, target);
         }
-
-        --mappingsPending_;
-        if (mappingsPending_ <= 0)
+        if (--mappingsPending_ <= 0)
         {
             refreshPhase_.store(0);
             sendChangeMessage();
@@ -257,8 +468,7 @@ void NTPerformProcessor::enqueueMappingRequest(int itemIndex)
 
     req.onTimeout = [this]()
     {
-        --mappingsPending_;
-        if (mappingsPending_ <= 0)
+        if (--mappingsPending_ <= 0)
         {
             refreshPhase_.store(0);
             sendChangeMessage();
@@ -270,15 +480,27 @@ void NTPerformProcessor::enqueueMappingRequest(int itemIndex)
 
 void NTPerformProcessor::sendParamValue(int slot, int param, int value)
 {
-    // Optimistic model update
     model_.setParamValue(slot, param, value);
     sendChangeMessage();
 
-    // Fire-and-forget SysEx
     SysExQueue::Request req;
     req.message             = DistingNT::buildSetParamValue(sysExId_.load(), slot, param, value);
     req.expectedResponseCmd = 0;
     queue_.enqueue(std::move(req));
+
+    // Send immediately if direct output is open
+    {
+        juce::ScopedLock sl(deviceLock_);
+        if (midiOutput_)
+        {
+            juce::MidiMessage outMsg;
+            if (queue_.tryDequeueNext(outMsg))
+            {
+                txActivity_.store(true);
+                midiOutput_->sendMessageNow(outMsg);
+            }
+        }
+    }
 }
 
 void NTPerformProcessor::setSysExId(int id)
@@ -294,8 +516,10 @@ void NTPerformProcessor::setSysExId(int id)
 void NTPerformProcessor::getStateInformation(juce::MemoryBlock& dest)
 {
     auto xml = std::make_unique<juce::XmlElement>("NTPerformState");
-    xml->setAttribute("sysExId",     sysExId_.load());
-    xml->setAttribute("currentPage", currentPage_.load());
+    xml->setAttribute("sysExId",       sysExId_.load());
+    xml->setAttribute("currentPage",   currentPage_.load());
+    xml->setAttribute("midiInputId",   getSelectedMidiInputId());
+    xml->setAttribute("midiOutputId",  getSelectedMidiOutputId());
     copyXmlToBinary(*xml, dest);
 }
 
@@ -306,22 +530,22 @@ void NTPerformProcessor::setStateInformation(const void* data, int size)
     {
         sysExId_.store(xml->getIntAttribute("sysExId", 1));
         currentPage_.store(xml->getIntAttribute("currentPage", 0));
-        refreshAllItems();
+
+        const auto inId  = xml->getStringAttribute("midiInputId");
+        const auto outId = xml->getStringAttribute("midiOutputId");
+        if (inId.isNotEmpty() || outId.isNotEmpty())
+            openMidiDevices(inId, outId);
+        else
+            refreshAllItems();
     }
 }
 
-//==============================================================================
-// Editor
 //==============================================================================
 
 juce::AudioProcessorEditor* NTPerformProcessor::createEditor()
 {
     return new NTPerformEditor(*this);
 }
-
-//==============================================================================
-// Plugin entry point
-//==============================================================================
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {

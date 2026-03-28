@@ -3,14 +3,26 @@
 NTPerformEditor::NTPerformEditor(NTPerformProcessor& proc)
     : AudioProcessorEditor(&proc), proc_(proc)
 {
-    setSize(520, 260);
+    setSize(560, 300);
     setResizable(true, false);
-    setResizeLimits(400, 220, 900, 500);
+    setResizeLimits(440, 260, 900, 600);
 
     // Status bar
+    statusBar_.onMidiInputChanged  = [this](const juce::String& name)
+    {
+        handleMidiInputSelected(name);
+    };
+    statusBar_.onMidiOutputChanged = [this](const juce::String& name)
+    {
+        handleMidiOutputSelected(name);
+    };
     statusBar_.onSysExIdChanged = [this](int id) { proc_.setSysExId(id); };
-    statusBar_.onRefreshClicked = [this]() { proc_.refreshAllItems(); };
+    statusBar_.onRefreshClicked = [this]()       { proc_.refreshAllItems(); };
+
     statusBar_.setSysExId(proc_.getSysExId());
+    statusBar_.setSelectedMidiInput (proc_.getSelectedMidiInputId());
+    statusBar_.setSelectedMidiOutput(proc_.getSelectedMidiOutputId());
+    statusBar_.setFirmwareVersion(proc_.getFirmwareVersion());
     addAndMakeVisible(statusBar_);
 
     // Page selector
@@ -35,13 +47,11 @@ NTPerformEditor::NTPerformEditor(NTPerformProcessor& proc)
     {
         const auto& data = pots_[focusedPot_].getData();
         if (!data.enabled || data.isEmpty) return;
-
-        const float step  = 1.0f / static_cast<float>(data.rangeMax - data.rangeMin + 1);
-        const float newFill = juce::jlimit(0.0f, 1.0f,
-                                            data.fillFraction + delta * step);
-        // Compute value and send
-        const int newValue = data.rangeMin
-            + static_cast<int>(newFill * (data.rangeMax - data.rangeMin) + 0.5f);
+        const float step    = 1.0f / static_cast<float>(
+                                  std::max(1, data.rangeMax - data.rangeMin));
+        const float newFill = juce::jlimit(0.0f, 1.0f, data.fillFraction + delta * step);
+        const int newValue  = data.rangeMin +
+            static_cast<int>(newFill * (data.rangeMax - data.rangeMin) + 0.5f);
         proc_.sendParamValue(data.slotIndex, data.paramNumber, newValue);
     };
     addAndMakeVisible(leftEncoder_);
@@ -57,7 +67,7 @@ NTPerformEditor::NTPerformEditor(NTPerformProcessor& proc)
         pot.setData(d);
 
         const int idx = i;
-        pot.onValueChange = [this, idx](int slot, int param, int value, bool /*dragging*/)
+        pot.onValueChange = [this, idx](int slot, int param, int value, bool)
         {
             focusedPot_ = idx;
             proc_.sendParamValue(slot, param, value);
@@ -66,12 +76,13 @@ NTPerformEditor::NTPerformEditor(NTPerformProcessor& proc)
     }
 
     proc_.addChangeListener(this);
+    startTimerHz(20); // poll TX/RX activity
     updatePage();
-    updateStatus();
 }
 
 NTPerformEditor::~NTPerformEditor()
 {
+    stopTimer();
     proc_.removeChangeListener(this);
 }
 
@@ -79,8 +90,15 @@ NTPerformEditor::~NTPerformEditor()
 
 void NTPerformEditor::changeListenerCallback(juce::ChangeBroadcaster*)
 {
+    statusBar_.setFirmwareVersion(proc_.getFirmwareVersion());
+    statusBar_.setSysExId(proc_.getSysExId());
     updatePage();
-    updateStatus();
+}
+
+void NTPerformEditor::timerCallback()
+{
+    if (proc_.hasTxActivity()) statusBar_.flashTx();
+    if (proc_.hasRxActivity()) statusBar_.flashRx();
 }
 
 void NTPerformEditor::updatePage()
@@ -96,50 +114,48 @@ void NTPerformEditor::updatePage()
         const float fill    = model.getFillFraction(itemIndex);
 
         PotComponent::Data d;
-        d.posLabel    = pos[i];
-        d.enabled     = item.enabled;
-        d.isEmpty     = !item.enabled;
-        d.upperLabel  = item.upperLabel[0] ? juce::String(item.upperLabel)
-                                           : juce::String(item.lowerLabel); // fallback
-        d.lowerLabel  = item.lowerLabel;
+        d.posLabel     = pos[i];
+        d.enabled      = item.enabled;
+        d.isEmpty      = !item.enabled;
+        d.upperLabel   = item.upperLabel[0] ? juce::String(item.upperLabel)
+                                            : juce::String(item.lowerLabel);
+        d.lowerLabel   = item.lowerLabel;
         d.fillFraction = fill >= 0.0f ? fill : 0.0f;
-        d.slotIndex   = item.slotIndex;
-        d.paramNumber = item.parameterNumber;
-        d.rangeMin    = item.min;
-        d.rangeMax    = item.max;
-
+        d.slotIndex    = item.slotIndex;
+        d.paramNumber  = item.parameterNumber;
+        d.rangeMin     = item.min;
+        d.rangeMax     = item.max;
         pots_[i].setData(d);
     }
 
-    // Update right encoder angle to show focused pot position
-    const auto& focusData = pots_[focusedPot_].getData();
-    rightEncoder_.setAngle(focusData.fillFraction);
-
-    // Update left encoder angle to show current page position
-    leftEncoder_.setAngle(static_cast<float>(page)
-                          / (PageSelectorComponent::kNumPages - 1));
+    rightEncoder_.setAngle(pots_[focusedPot_].getData().fillFraction);
+    leftEncoder_.setAngle(static_cast<float>(page) /
+                          (PageSelectorComponent::kNumPages - 1));
 }
 
-void NTPerformEditor::updateStatus()
+//==============================================================================
+
+void NTPerformEditor::handleMidiInputSelected(const juce::String& name)
 {
-    const bool refreshing = proc_.isRefreshing();
-    const int  loaded     = proc_.getLoadProgress();
+    // Translate name → identifier
+    juce::String inputId, outputId = proc_.getSelectedMidiOutputId();
+    if (name.isNotEmpty())
+    {
+        for (const auto& d : juce::MidiInput::getAvailableDevices())
+            if (d.name == name) { inputId = d.identifier; break; }
+    }
+    proc_.openMidiDevices(inputId, outputId);
+}
 
-    statusBar_.setSysExId(proc_.getSysExId());
-    statusBar_.setRefreshing(refreshing, loaded, PerformPageModel::kTotalItems);
-
-    if (refreshing)
+void NTPerformEditor::handleMidiOutputSelected(const juce::String& name)
+{
+    juce::String inputId = proc_.getSelectedMidiInputId(), outputId;
+    if (name.isNotEmpty())
     {
-        statusBar_.setStatus("Loading items...");
+        for (const auto& d : juce::MidiOutput::getAvailableDevices())
+            if (d.name == name) { outputId = d.identifier; break; }
     }
-    else if (proc_.getModel().isFullyLoaded())
-    {
-        statusBar_.setStatus("Ready");
-    }
-    else
-    {
-        statusBar_.setStatus("Not connected — click Refresh");
-    }
+    proc_.openMidiDevices(inputId, outputId);
 }
 
 //==============================================================================
@@ -152,19 +168,13 @@ void NTPerformEditor::paint(juce::Graphics& g)
 void NTPerformEditor::resized()
 {
     auto area = getLocalBounds();
-
-    // Status bar at top
-    statusBar_.setBounds(area.removeFromTop(30));
-
-    // Page selector below
+    statusBar_.setBounds  (area.removeFromTop(StatusBarComponent::kHeight));
     pageSelector_.setBounds(area.removeFromTop(36));
 
-    // Remaining area: [left encoder] [3 pots] [right encoder]
     const int encoderW = 80;
     leftEncoder_.setBounds (area.removeFromLeft(encoderW));
     rightEncoder_.setBounds(area.removeFromRight(encoderW));
 
-    // 3 pots share the remaining width
     const int potW = area.getWidth() / 3;
     for (int i = 0; i < 3; ++i)
         pots_[i].setBounds(area.removeFromLeft(i < 2 ? potW : area.getWidth()));

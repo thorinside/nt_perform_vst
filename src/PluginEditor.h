@@ -9,7 +9,8 @@
 #include "ui/StatusBarComponent.h"
 
 class NTPerformEditor : public juce::AudioProcessorEditor,
-                        private juce::ChangeListener
+                        private juce::ChangeListener,
+                        private juce::Timer
 {
 public:
     explicit NTPerformEditor(NTPerformProcessor& proc);
@@ -21,24 +22,22 @@ public:
 private:
     NTPerformProcessor& proc_;
 
-    StatusBarComponent   statusBar_;
+    StatusBarComponent    statusBar_;
     PageSelectorComponent pageSelector_;
 
     EncoderComponent leftEncoder_  { EncoderComponent::Role::PageNav,    "Page" };
     EncoderComponent rightEncoder_ { EncoderComponent::Role::ValueAdjust, "Adjust" };
 
     std::array<PotComponent, 3> pots_;
+    int focusedPot_ = 0;
 
-    int focusedPot_ = 0; // 0–2, which pot the right encoder adjusts
-
-    // ChangeListener — called on message thread when model changes
-    void changeListenerCallback(juce::ChangeBroadcaster* source) override;
-
-    // Rebuild pot display from model for the current page
+    void changeListenerCallback(juce::ChangeBroadcaster*) override;
+    void timerCallback() override; // polls TX/RX activity for LED flashing
     void updatePage();
 
-    // Update status bar text
-    void updateStatus();
+    // Translate device name from combo to identifier, then open ports
+    void handleMidiInputSelected(const juce::String& name);
+    void handleMidiOutputSelected(const juce::String& name);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NTPerformEditor)
 };

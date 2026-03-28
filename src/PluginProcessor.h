@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_audio_devices/juce_audio_devices.h>
 #include <juce_events/juce_events.h>
 #include <atomic>
 #include <array>
@@ -11,7 +12,8 @@
 
 class NTPerformProcessor : public juce::AudioProcessor,
                            public juce::ChangeBroadcaster,
-                           private juce::Timer
+                           private juce::Timer,
+                           private juce::MidiInputCallback
 {
 public:
     NTPerformProcessor();
@@ -43,6 +45,13 @@ public:
     void setStateInformation(const void* data, int size) override;
 
     //==========================================================================
+    // Direct MIDI device management (bypasses DAW routing)
+    void openMidiDevices(const juce::String& inputId,
+                         const juce::String& outputId);
+    juce::String getSelectedMidiInputId()  const;
+    juce::String getSelectedMidiOutputId() const;
+
+    //==========================================================================
     // Protocol control (call from message thread / editor)
     void refreshAllItems();
     void sendParamValue(int slot, int param, int value);
@@ -50,18 +59,17 @@ public:
 
     //==========================================================================
     // Accessors
-    PerformPageModel& getModel()      { return model_; }
-    int               getSysExId() const { return sysExId_.load(); }
+    PerformPageModel& getModel()          { return model_; }
+    int               getSysExId() const  { return sysExId_.load(); }
+    int               getLoadProgress() const { return loadProgress_.load(); }
+    bool              isRefreshing() const    { return refreshPhase_.load() != 0; }
+    int               getCurrentPage() const  { return currentPage_.load(); }
+    void              setCurrentPage(int p)   { currentPage_.store(p); }
+    juce::String      getFirmwareVersion() const;
 
-    // How many items have been loaded during the current refresh (0-30)
-    int getLoadProgress() const       { return loadProgress_.load(); }
-
-    // True while a refresh is in progress
-    bool isRefreshing() const         { return refreshPhase_.load() != 0; }
-
-    // Current page cached for save/restore
-    int  getCurrentPage() const       { return currentPage_.load(); }
-    void setCurrentPage(int p)        { currentPage_.store(p); }
+    // Activity: true if TX or RX fired in the last timer tick
+    bool hasTxActivity() const { return txActivity_.load(); }
+    bool hasRxActivity() const { return rxActivity_.load(); }
 
 private:
     PerformPageModel model_;
@@ -71,35 +79,56 @@ private:
     std::atomic<int>  sysExId_     { 1 };
     std::atomic<int>  currentPage_ { 0 };
 
-    // Refresh state: 0 = idle, 1 = loading items (phase1), 2 = loading mappings (phase2)
+    // Firmware version (set from message thread after 0x32 response)
+    juce::String firmwareVersion_;
+    mutable juce::CriticalSection fwVersionLock_;
+
+    // Refresh state: 0=idle, 1=loading items, 2=loading mappings
     std::atomic<int> refreshPhase_ { 0 };
     std::atomic<int> loadProgress_ { 0 };
-    int              mappingsPending_ = 0; // protected by queue lock (message thread only)
+    int              mappingsPending_ = 0;
 
-    // Lock-free ring buffer: audio thread → message thread
+    // Activity indicators (set from any thread, cleared in timerCallback)
+    std::atomic<bool> txActivity_ { false };
+    std::atomic<bool> rxActivity_ { false };
+
+    // Direct MIDI I/O (bypasses DAW routing)
+    std::unique_ptr<juce::MidiInput>  midiInput_;
+    std::unique_ptr<juce::MidiOutput> midiOutput_;
+    juce::String selectedInputId_;
+    juce::String selectedOutputId_;
+    mutable juce::CriticalSection deviceLock_;
+
+    // Lock-free CC ring buffer: MIDI callback thread → message thread
     struct CcEvent { int channel, cc, value; };
     static constexpr int kCcFifoSize = 256;
     juce::AbstractFifo               ccFifo_ { kCcFifoSize };
     std::array<CcEvent, kCcFifoSize> ccBuffer_;
 
-    // Message to inject into the MidiBuffer next processBlock call.
-    // Protected by outgoingLock_.
+    // Lock-free SysEx ring buffer: MIDI callback thread → message thread
+    // Stores serialised SysEx messages as raw bytes prefixed by 2-byte length
+    static constexpr int kSysExFifoSize = 4096;
+    juce::AbstractFifo               sysexFifo_ { kSysExFifoSize };
+    std::array<uint8_t, kSysExFifoSize> sysexBuffer_;
+
+    //==========================================================================
+    // MidiInputCallback (direct device — background thread)
+    void handleIncomingMidiMessage(juce::MidiInput*, const juce::MidiMessage&) override;
+
+    // Send a MIDI message: via direct output if open, else buffered for processBlock
+    void sendMidi(const juce::MidiMessage& msg);
+
+    // Buffered outgoing message for processBlock fallback
     juce::MidiMessage   pendingOutgoing_;
     bool                hasPendingOutgoing_ = false;
     juce::CriticalSection outgoingLock_;
 
+    //==========================================================================
     void timerCallback() override;
-
-    // Called on message thread: start phase 1 (query perf page items)
+    void processIncomingMessage(const juce::MidiMessage& msg);
     void startPhase1();
-
-    // Called on message thread after phase 1: start phase 2 (query CC mappings)
     void startPhase2();
-
-    // Enqueue a single perf page item request, chaining to the next on response
     void enqueueItemRequest(int itemIndex);
-
-    // Enqueue CC mapping request for a single item, counting down mappingsPending_
     void enqueueMappingRequest(int itemIndex);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NTPerformProcessor)
