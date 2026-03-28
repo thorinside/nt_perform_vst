@@ -4,7 +4,6 @@
 
 #include "PluginProcessor.h"
 #include "ui/PotComponent.h"
-#include "ui/EncoderComponent.h"
 #include "ui/PageSelectorComponent.h"
 #include "ui/StatusBarComponent.h"
 
@@ -24,9 +23,6 @@ private:
 
     StatusBarComponent    statusBar_;
     PageSelectorComponent pageSelector_;
-
-    EncoderComponent leftEncoder_  { EncoderComponent::Role::PageNav,    "Page" };
-    EncoderComponent rightEncoder_ { EncoderComponent::Role::ValueAdjust, "Adjust" };
 
     enum class ViewMode { Standard, Grid };
     ViewMode viewMode_ = ViewMode::Standard;

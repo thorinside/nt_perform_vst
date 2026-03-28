@@ -34,35 +34,9 @@ NTPerformEditor::NTPerformEditor(NTPerformProcessor& proc)
     pageSelector_.onPageSelected = [this](int page)
     {
         proc_.setCurrentPage(page);
-        focusedPot_ = page * 3 + (focusedPot_ % 3);
         updatePage();
     };
     addAndMakeVisible(pageSelector_);
-
-    // Encoders
-    leftEncoder_.onPageDelta = [this](int delta)
-    {
-        const int newPage = juce::jlimit(0, PageSelectorComponent::kNumPages - 1,
-                                         proc_.getCurrentPage() + delta);
-        proc_.setCurrentPage(newPage);
-        focusedPot_ = newPage * 3 + (focusedPot_ % 3);
-        updatePage();
-    };
-    rightEncoder_.onValueDelta = [this](int delta)
-    {
-        const auto& data = pots_[focusedPot_].getData();
-        if (!data.enabled || data.isEmpty) return;
-        const float step    = 1.0f / static_cast<float>(
-                                  std::max(1, data.rangeMax - data.rangeMin));
-        const float newFill = juce::jlimit(0.0f, 1.0f, data.fillFraction + delta * step);
-        const int newValue  = data.rangeMin +
-            static_cast<int>(newFill * (data.rangeMax - data.rangeMin) + 0.5f);
-        proc_.sendParamValue(data.slotIndex, data.paramNumber, newValue);
-        if (auto* p = proc_.getPerfParam(focusedPot_))
-            p->sendValueChangedMessageToListeners(p->getValue());
-    };
-    addAndMakeVisible(leftEncoder_);
-    addAndMakeVisible(rightEncoder_);
 
     // Pots — all 30 items; visibility managed by setViewMode / updatePage
     static const char* posLabels[] = { "Pot L", "Pot C", "Pot R" };
@@ -153,12 +127,7 @@ void NTPerformEditor::updatePage()
     }
 
     if (viewMode_ == ViewMode::Standard)
-    {
         pageSelector_.setCurrentPage(page);
-        rightEncoder_.setAngle(pots_[focusedPot_].getData().fillFraction);
-        leftEncoder_.setAngle(static_cast<float>(page) /
-                              (PageSelectorComponent::kNumPages - 1));
-    }
 }
 
 //==============================================================================
@@ -169,8 +138,6 @@ void NTPerformEditor::setViewMode(ViewMode mode)
     const bool isGrid = (mode == ViewMode::Grid);
 
     pageSelector_.setVisible(!isGrid);
-    leftEncoder_.setVisible(!isGrid);
-    rightEncoder_.setVisible(!isGrid);
 
     if (isGrid)
     {
@@ -182,7 +149,6 @@ void NTPerformEditor::setViewMode(ViewMode mode)
     else
     {
         const int page = proc_.getCurrentPage();
-        focusedPot_ = page * 3 + (focusedPot_ % 3);
         for (int i = 0; i < 30; ++i)
             pots_[i].setVisible(i / 3 == page);
         setResizeLimits(448, 256, 896, 608);
@@ -232,10 +198,6 @@ void NTPerformEditor::resized()
     if (viewMode_ == ViewMode::Standard)
     {
         pageSelector_.setBounds(area.removeFromTop(32));
-
-        const int encoderW = 80;
-        leftEncoder_.setBounds (area.removeFromLeft(encoderW));
-        rightEncoder_.setBounds(area.removeFromRight(encoderW));
 
         // All pots in a page share the same 3 column positions (only 3 visible at a time)
         const int potW = area.getWidth() / 3;
