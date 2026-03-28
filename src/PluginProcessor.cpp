@@ -2,7 +2,8 @@
 #include "PluginEditor.h"
 
 NTPerformProcessor::NTPerformProcessor()
-    : AudioProcessor(BusesProperties())
+    : AudioProcessor(BusesProperties()
+                         .withOutput("Output", juce::AudioChannelSet::stereo(), true))
 {
     for (int i = 0; i < PerformPageModel::kTotalItems; ++i)
         perfParams_[i] = new PerfPageParam(*this, model_, i);

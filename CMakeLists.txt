@@ -30,7 +30,6 @@ juce_add_plugin(NTPerform
     PLUGIN_MANUFACTURER_CODE Nscn
     PLUGIN_CODE              NtPf
     FORMATS                  VST3 AU
-    IS_MIDI_EFFECT           TRUE
     NEEDS_MIDI_INPUT         TRUE
     NEEDS_MIDI_OUTPUT        TRUE
     PLUGIN_NAME              "NT Perform"
